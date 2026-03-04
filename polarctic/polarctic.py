@@ -5,17 +5,20 @@ Use of this software is governed by the Business Source License 1.1 included in 
 
 As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
 """
-import datetime as dt
 import ast
+import datetime as dt
 import re
-import polars as pl
+from collections.abc import Iterator
+from typing import Any, cast
+
 import numpy as np
-from arcticdb import Arctic, LibraryOptions, QueryBuilder, LazyDataFrame, OutputFormat
+import polars as pl
+from arcticdb import Arctic, OutputFormat, QueryBuilder
 from arcticdb.version_store.library import Library
 from arcticdb.version_store.processing import ExpressionNode
-from arcticdb_ext.version_store import OperationType
 from arcticdb_ext.util import RegexGeneric
-from typing import cast, Iterator, Any, Optional
+from arcticdb_ext.version_store import OperationType
+
 
 class PolarsToArcticDBTranslator:
     """
@@ -270,10 +273,17 @@ def scan_arcticdb(
     ) -> Iterator[pl.DataFrame]:
 
         qb = None
+        apply_polars_filter = False
         if predicate is not None:
             tl = PolarsToArcticDBTranslator()
-            qb = QueryBuilder()
-            qb = tl.translate(predicate, qb)
+            try:
+                qb = QueryBuilder()
+                qb = tl.translate(predicate, qb)
+            except (NotImplementedError, ValueError):
+                # Predicate (or part of it) cannot be pushed down to ArcticDB.
+                # Fetch all rows and apply the full predicate in Polars instead.
+                qb = None
+                apply_polars_filter = True
 
         lazy_df = lib.read(symbol, as_of = as_of, columns = with_columns, query_builder = qb, lazy = True, output_format=OutputFormat.PYARROW)
 
@@ -288,11 +298,21 @@ def scan_arcticdb(
             lazy_df_slice = lazy_df.row_range((read_idx, read_idx + batch_size))
             read_idx += batch_size
             arrow_df = lazy_df_slice.collect().data
+            exhausted = arrow_df.num_rows < batch_size
+
+            df = cast(pl.DataFrame, pl.from_arrow(arrow_df))
+
+            if apply_polars_filter:
+                df = df.filter(predicate)
+
             if n_rows is not None:
-                n_rows -= arrow_df.num_rows
-            elif arrow_df.num_rows < batch_size:
+                n_rows -= len(df)
+            elif exhausted:
                 n_rows = 0
 
-            yield cast(pl.DataFrame, pl.from_arrow(arrow_df))
+            yield df
+
+            if exhausted:
+                break
 
     return pl.io.plugins.register_io_source(io_source=source_generator, schema = schema)    

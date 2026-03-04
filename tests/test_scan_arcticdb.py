@@ -19,17 +19,16 @@ Dependencies (imported at module import time, not lazily):
 Each test takes both fixtures init_arcticdb and delete_arcticdb so setup runs
 before the test and teardown removes the LMDB store afterwards.
 """
-import os
+from unittest.mock import patch
+
 import pandas as pd
 import pandas.testing as pdt
 import polars as pl
-import pyarrow as pa
-import arcticdb
-from arcticdb import OutputFormat, VersionedItem, QueryBuilder
-
 import pytest
+from arcticdb import OutputFormat, QueryBuilder, VersionedItem
 
 import polarctic.polarctic as polarctic_module
+
 
 def test_parse_schema_returns_expected_schema(init_arcticdb, delete_arcticdb):
     """
@@ -96,3 +95,76 @@ def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
         pd_df: pd.DataFrame = pl_df.to_pandas()
         pdt.assert_frame_equal(pd_df, expected_df[["a", "b"]], check_dtype=False, check_like=True)
 
+
+def test_scan_arcticdb_unsupported_predicate_falls_back_to_polars(init_arcticdb, delete_arcticdb):
+    """
+    When the predicate cannot be translated to ArcticDB (e.g. modulo operator),
+    scan_arcticdb must NOT raise; instead it falls back to Polars-side filtering
+    and still returns the correct rows.
+    """
+    info = init_arcticdb
+    uri = info["uri"]
+    lib_name = info["lib_name"]
+    expected_tables: dict = info["tables"]
+
+    # Confirm the predicate cannot be translated before relying on the fallback.
+    predicate = pl.col("a") % 2 == 0
+    with pytest.raises(NotImplementedError):
+        polarctic_module.PolarsToArcticDBTranslator().translate(predicate, QueryBuilder())
+
+    for symbol, expected_df in expected_tables.items():
+        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
+        pl_df: pl.DataFrame = lazy.filter(predicate).collect()
+        pd_df: pd.DataFrame = pl_df.to_pandas()
+
+        expected = expected_df[expected_df["a"] % 2 == 0].reset_index(drop=True)
+        pdt.assert_frame_equal(pd_df, expected, check_dtype=False, check_like=True)
+
+
+def test_scan_arcticdb_unsupported_predicate_skips_arcticdb_pushdown(init_arcticdb, delete_arcticdb):
+    """
+    When the predicate cannot be translated, query_builder passed to lib.read
+    must be None (no pushdown attempted), and the Polars filter is applied instead.
+    """
+    info = init_arcticdb
+    uri = info["uri"]
+    lib_name = info["lib_name"]
+
+    predicate = pl.col("a") % 2 == 0
+    # Confirm the predicate cannot be translated before relying on the fallback.
+    with pytest.raises(NotImplementedError):
+        polarctic_module.PolarsToArcticDBTranslator().translate(predicate, QueryBuilder())
+
+    with patch.object(polarctic_module.PolarsToArcticDBTranslator, "translate",
+                      side_effect=NotImplementedError("modulo not supported")) as mock_translate:
+        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
+        pl_df: pl.DataFrame = lazy.filter(predicate).collect()
+
+    # Translation was attempted exactly once
+    mock_translate.assert_called_once()
+
+    # Results are still correct (Polars fallback applied)
+    expected = info["tables"]["df1"]
+    expected = expected[expected["a"] % 2 == 0].reset_index(drop=True)
+    pdt.assert_frame_equal(pl_df.to_pandas(), expected, check_dtype=False, check_like=True)
+
+
+def test_scan_arcticdb_unsupported_predicate_combined_with_column_select(init_arcticdb, delete_arcticdb):
+    """
+    Unsupported predicate fallback must compose correctly with column projection.
+    """
+    info = init_arcticdb
+    uri = info["uri"]
+    lib_name = info["lib_name"]
+
+    predicate = pl.col("a") % 2 == 0
+    # Confirm the predicate cannot be translated before relying on the fallback.
+    with pytest.raises(NotImplementedError):
+        polarctic_module.PolarsToArcticDBTranslator().translate(predicate, QueryBuilder())
+
+    lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
+    pl_df: pl.DataFrame = lazy.filter(predicate).select("a", "b").collect()
+
+    expected = info["tables"]["df1"]
+    expected = expected[expected["a"] % 2 == 0][["a", "b"]].reset_index(drop=True)
+    pdt.assert_frame_equal(pl_df.to_pandas(), expected, check_dtype=False, check_like=True)

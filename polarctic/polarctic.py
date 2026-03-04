@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
 from arcticdb import Arctic, OutputFormat, QueryBuilder
 from arcticdb.version_store.library import Library
 from arcticdb.version_store.processing import ExpressionNode
@@ -167,15 +168,16 @@ class PolarsToArcticDBTranslator:
 
         raise NotImplementedError(f"Attribute {attr} not supported for object {obj}")
 
-    def _process_compare(self, node: ast.Compare) -> Any:
+    def _process_compare(self, node: ast.Compare) -> None | ExpressionNode:
         """Process comparison operations and apply filters."""
 
         left = self._process_node(node.left)
 
+        expr_node = None
+
         # Handle multiple comparisons
         for op, comparator in zip(node.ops, node.comparators):
             right = self._process_node(comparator)
-            expr_node = None
             op_type = type(op)
 
             match op_type:
@@ -250,8 +252,14 @@ def parse_schema(
     symbol: str,
     as_of: int | str | dt.datetime | None = None
 ) -> pl.Schema:
-    arrow_df = lib.read(symbol, as_of=as_of, output_format=OutputFormat.PYARROW, row_range=((0,1))).data
-    return pl.Schema(arrow_df.schema) 
+    result = lib.read(
+        symbol,
+        as_of=as_of,
+        output_format=OutputFormat.PYARROW,
+        row_range=(0, 1),
+    )
+    arrow_table = cast(pa.Table, result.data)
+    return pl.Schema(arrow_table.schema)
 
 def scan_arcticdb(
     uri: str,
@@ -285,7 +293,17 @@ def scan_arcticdb(
                 qb = None
                 apply_polars_filter = True
 
-        lazy_df = lib.read(symbol, as_of = as_of, columns = with_columns, query_builder = qb, lazy = True, output_format=OutputFormat.PYARROW)
+        lazy_df = cast(
+            Any,
+            lib.read(
+                symbol,
+                as_of=as_of,
+                columns=with_columns,
+                query_builder=qb,
+                lazy=True,
+                output_format=OutputFormat.PYARROW,
+            ),
+        )
 
         if batch_size is None:
             batch_size = 1000
@@ -302,7 +320,7 @@ def scan_arcticdb(
 
             df = cast(pl.DataFrame, pl.from_arrow(arrow_df))
 
-            if apply_polars_filter:
+            if apply_polars_filter and predicate is not None:
                 df = df.filter(predicate)
 
             if n_rows is not None:

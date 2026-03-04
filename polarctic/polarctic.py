@@ -313,10 +313,15 @@ def scan_arcticdb(
 
         read_idx = 0
         while n_rows is None or n_rows > 0:
-            lazy_df_slice = lazy_df.row_range((read_idx, read_idx + batch_size))
-            read_idx += batch_size
+            if n_rows is not None:
+                current_batch_size = min(batch_size, n_rows)
+            else:
+                current_batch_size = batch_size
+
+            lazy_df_slice = lazy_df.row_range((read_idx, read_idx + current_batch_size))
+            read_idx += current_batch_size
             arrow_df = lazy_df_slice.collect().data
-            exhausted = arrow_df.num_rows < batch_size
+            exhausted = arrow_df.num_rows < current_batch_size
 
             df = cast(pl.DataFrame, pl.from_arrow(arrow_df))
 

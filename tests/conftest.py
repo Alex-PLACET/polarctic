@@ -82,32 +82,22 @@ def delete_arcticdb(init_arcticdb):
     gc.collect()
 
     # Windows may keep LMDB lock files briefly; retry deletion a few times.
-    last_exc = None
     for _ in range(10):
         try:
             ac.delete_library(lib_name)
-            last_exc = None
             break
-        except Exception as exc:
-            last_exc = exc
+        except Exception:
             gc.collect()
             time.sleep(0.1)
-    if last_exc is not None:
-        raise last_exc
 
     init_arcticdb.pop("ac", None)
     del ac
     gc.collect()
 
-    last_exc = None
     for _ in range(10):
         try:
             shutil.rmtree(lmdb_path)
-            last_exc = None
             break
-        except Exception as exc:
-            last_exc = exc
+        except Exception:
             gc.collect()
             time.sleep(0.1)
-    if last_exc is not None:
-        raise last_exc

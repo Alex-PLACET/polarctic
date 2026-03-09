@@ -273,7 +273,11 @@ def _translate_predicate(
 
     translator = PolarsToArcticDBTranslator()
     base_query_builder = query_builder or QueryBuilder()
-    return cast(QueryBuilder, translator.translate(predicate, base_query_builder))
+    try:
+        return cast(QueryBuilder, translator.translate(predicate, base_query_builder))
+    except (NotImplementedError, ValueError):
+        # Unsupported predicate for ArcticDB pushdown; fall back to Polars-side filtering
+        return query_builder
 
 
 def _iter_read_request_batches(
@@ -349,7 +353,7 @@ def _scan_lazy_dataframe(source: LazyDataFrame) -> pl.LazyFrame:
     """Register a Polars IO source backed by an existing ArcticDB LazyDataFrame.
 
     The LazyDataFrame may already carry ArcticDB-level QueryBuilder operations
-    (projections, filters, projections). Any additional Polars predicates or
+    (projections, filters). Any additional Polars predicates or
     column selections are pushed down on top of those.
     """
 

@@ -289,8 +289,8 @@ def test_iter_read_request_batches_streaming_handles_n_rows_limit(
             batch_size=2,
         )
     )
+
     assert [batch.height for batch in batches] == [2, 1]
-    assert [batch.height for batch in batches] == [2]
 
 
 def test_iter_read_request_batches_streaming_stops_on_empty_batch(

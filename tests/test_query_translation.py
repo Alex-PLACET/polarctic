@@ -3,7 +3,6 @@ from typing import Any
 
 import polars as pl
 import pytest
-from pytest import MonkeyPatch
 from arcticdb import QueryBuilder
 
 import polarctic.polarctic as polarctic_module
@@ -218,7 +217,7 @@ def test_isin(translator: PolarsToArcticDBTranslator) -> None:
 
 def test_translate_invalid_expression_raises_value_error(
     translator: PolarsToArcticDBTranslator,
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def raise_syntax_error(_expr: str) -> ast.AST:
         raise SyntaxError("invalid")
@@ -247,7 +246,7 @@ def test_process_node_name_unary_and_unsupported(
 
 def test_process_call_contains_requires_string_namespace(
     translator: PolarsToArcticDBTranslator,
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     call_node = ast.parse('col("a").contains("x")', mode="eval").body
     assert isinstance(call_node, ast.Call)
@@ -331,7 +330,7 @@ def test_process_attribute_compare_and_unary_error_branches(
 
 
 def test_translate_predicate_falls_back_on_unsupported_predicate(
-    monkeypatch: MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def raise_not_implemented(_predicate: pl.Expr, _query_builder: QueryBuilder) -> Any:
         raise NotImplementedError("unsupported")

@@ -317,11 +317,20 @@ def _iter_read_request_batches(
         return
 
     # Streaming path: yield fixed-size batches so Polars can process them incrementally.
-    # The base LazyDataFrame is created once; only the row_range changes per batch.
+    # ArcticDB LazyDataFrame.row_range mutates in place, so each batch must use a
+    # fresh ReadRequest with an absolute row_range.
     effective_batch_size = batch_size
+    base_start = 0
+    base_end: int | None = None
+    if read_request.row_range is not None:
+        start, end = read_request.row_range
+        if start is not None:
+            base_start = start
+        if end is not None:
+            base_end = end
+
     read_offset = 0
     remaining_rows = n_rows
-    base_lazy = cast(LazyDataFrame, lib.read(**read_request._asdict(), lazy=True))
 
     while remaining_rows is None or remaining_rows > 0:
         current_batch_size = (
@@ -330,11 +339,15 @@ def _iter_read_request_batches(
             else min(effective_batch_size, remaining_rows)
         )
 
-        lazy_batch = cast(
-            LazyDataFrame,
-            base_lazy.row_range((read_offset, read_offset + current_batch_size)),
-        )
-        arrow_table = cast(pa.Table, lazy_batch.collect().data)
+        batch_start = base_start + read_offset
+        batch_end = batch_start + current_batch_size
+        if base_end is not None:
+            batch_end = min(batch_end, base_end)
+        if batch_end <= batch_start:
+            break
+
+        batch_request = read_request._replace(row_range=(batch_start, batch_end))
+        arrow_table = cast(pa.Table, lib.read(**batch_request._asdict()).data)
         rows_read = arrow_table.num_rows
 
         if rows_read == 0:

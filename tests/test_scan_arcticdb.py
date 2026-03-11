@@ -1,7 +1,9 @@
 import pandas as pd
 import pandas.testing as pdt
 import polars as pl
+import pytest
 from arcticdb import OutputFormat, QueryBuilder, VersionedItem
+from typing import Any
 
 import polarctic.polarctic as polarctic_module
 
@@ -28,7 +30,10 @@ before the test and teardown removes the LMDB store afterwards.
 """
 
 
-def test_parse_schema_returns_expected_schema(init_arcticdb, delete_arcticdb):
+def test_parse_schema_returns_expected_schema(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """
     Test polarctic.parse_schema by passing the real Library instance and ensuring
     the returned polars.Schema lists the columns we wrote.
@@ -44,7 +49,10 @@ def test_parse_schema_returns_expected_schema(init_arcticdb, delete_arcticdb):
     assert "ts" in schema.names()
 
 
-def test_scan_arcticdb_reads_data(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_reads_data(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     info = init_arcticdb
     uri = info["uri"]
     lib_name = info["lib_name"]
@@ -57,7 +65,10 @@ def test_scan_arcticdb_reads_data(init_arcticdb, delete_arcticdb):
         pdt.assert_frame_equal(pd_df, expected_df, check_dtype=False, check_like=True)
 
 
-def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
+def test_scan_articdb_with_filter(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     info = init_arcticdb
     uri = info["uri"]
     lib = info["lib"]
@@ -84,7 +95,10 @@ def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
             pdt.assert_frame_equal(pd_df, arctic_df.data, check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_with_select(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     info = init_arcticdb
     uri = info["uri"]
     lib_name = info["lib_name"]
@@ -97,7 +111,10 @@ def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
         pdt.assert_frame_equal(pd_df, expected_df[["a", "b"]], check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_library_source(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_library_source(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """scan_arcticdb(lib, symbol) form produces the same result as the URI form."""
     info = init_arcticdb
     uri = info["uri"]
@@ -116,7 +133,10 @@ def test_scan_arcticdb_library_source(init_arcticdb, delete_arcticdb):
         )
 
 
-def test_scan_arcticdb_lazy_dataframe_source(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_lazy_dataframe_source(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """scan_arcticdb(lazy_df) reads the same data as the Library form."""
     info = init_arcticdb
     lib = info["lib"]
@@ -135,7 +155,10 @@ def test_scan_arcticdb_lazy_dataframe_source(init_arcticdb, delete_arcticdb):
         )
 
 
-def test_scan_arcticdb_lazy_dataframe_with_prefilter(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_lazy_dataframe_with_prefilter(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """ArcticDB-level QB pre-filter on the LazyDataFrame is preserved, and an
     additional Polars predicate is pushed down on top of it."""
     info = init_arcticdb
@@ -159,7 +182,10 @@ def test_scan_arcticdb_lazy_dataframe_with_prefilter(init_arcticdb, delete_arcti
     pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_lazy_dataframe_with_column_selection(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_lazy_dataframe_with_column_selection(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """Column selection (select) is pushed down into the LazyDataFrame read."""
     info = init_arcticdb
     lib = info["lib"]
@@ -173,7 +199,10 @@ def test_scan_arcticdb_lazy_dataframe_with_column_selection(init_arcticdb, delet
     pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_lazy_dataframe_with_row_range(init_arcticdb, delete_arcticdb):
+def test_scan_arcticdb_lazy_dataframe_with_row_range(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """A pre-sliced LazyDataFrame keeps its base row_range when scanned."""
     info = init_arcticdb
     lib = info["lib"]
@@ -197,9 +226,9 @@ def test_scan_arcticdb_lazy_dataframe_with_row_range(init_arcticdb, delete_arcti
 
 
 def test_scan_arcticdb_lazy_dataframe_with_schema_changing_projection(
-    init_arcticdb,
-    delete_arcticdb,
-):
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
     """Schema-changing ArcticDB preprocessing is reflected in Polars schema and data."""
     info = init_arcticdb
     lib = info["lib"]
@@ -218,3 +247,108 @@ def test_scan_arcticdb_lazy_dataframe_with_schema_changing_projection(
     result = lf.collect().to_pandas()
     expected["c"] = expected["a"] + expected["b"]
     pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
+
+
+def test_iter_read_request_batches_fast_path_respects_row_range_and_n_rows(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
+    del delete_arcticdb
+    lib = init_arcticdb["lib"]
+    lazy_df = lib.read("df1", lazy=True, output_format=OutputFormat.PYARROW)
+    read_request = lazy_df._to_read_request()._replace(row_range=(2, 8))
+
+    batches = list(
+        polarctic_module._iter_read_request_batches(
+            lib,
+            read_request,
+            n_rows=3,
+            batch_size=None,
+        )
+    )
+
+    assert [batch.height for batch in batches] == [3]
+    assert batches[0]["a"].to_list() == [2, 3, 4]
+
+
+def test_iter_read_request_batches_streaming_handles_n_rows_limit(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
+    del delete_arcticdb
+    lib = init_arcticdb["lib"]
+    lazy_df = lib.read("df1", lazy=True, output_format=OutputFormat.PYARROW)
+    read_request = lazy_df._to_read_request()
+
+    batches = list(
+        polarctic_module._iter_read_request_batches(
+            lib,
+            read_request,
+            n_rows=3,
+            batch_size=2,
+        )
+    )
+
+    assert [batch.height for batch in batches] == [2]
+
+
+def test_iter_read_request_batches_streaming_stops_on_empty_batch(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
+    del delete_arcticdb
+    lib = init_arcticdb["lib"]
+    lazy_df = lib.read("df1", lazy=True, output_format=OutputFormat.PYARROW)
+    read_request = lazy_df._to_read_request()._replace(row_range=(20, 25))
+
+    batches = list(
+        polarctic_module._iter_read_request_batches(
+            lib,
+            read_request,
+            n_rows=4,
+            batch_size=2,
+        )
+    )
+
+    assert batches == []
+
+
+def test_register_arctic_source_normalizes_output_format(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
+    del delete_arcticdb
+    lib = init_arcticdb["lib"]
+    symbol = "df1"
+    expected = init_arcticdb["tables"][symbol]
+
+    lazy_df = lib.read(symbol, lazy=True, output_format=OutputFormat.PYARROW)
+    read_request = lazy_df._to_read_request()._replace(output_format=OutputFormat.PANDAS)
+
+    lf = polarctic_module._register_arctic_source(
+        lib=lib,
+        schema_getter=lambda: polarctic_module.parse_schema(lib, symbol),
+        read_request_getter=lambda: read_request,
+    )
+
+    result = lf.collect().to_pandas()
+    pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
+
+
+def test_scan_arcticdb_validates_input_combinations(
+    init_arcticdb: dict[str, Any],
+    delete_arcticdb: Any,
+) -> None:
+    del delete_arcticdb
+    uri = init_arcticdb["uri"]
+    lib_name = init_arcticdb["lib_name"]
+    lib = init_arcticdb["lib"]
+
+    with pytest.raises(ValueError, match="lib_name and symbol are required"):
+        polarctic_module.scan_arcticdb(uri, lib_name)
+
+    with pytest.raises(ValueError, match="symbol is required when source is a Library"):
+        polarctic_module.scan_arcticdb(lib)
+
+    with pytest.raises(TypeError, match="Unsupported source type"):
+        polarctic_module.scan_arcticdb(123)  # type: ignore[arg-type]

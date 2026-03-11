@@ -1,9 +1,12 @@
+import ast
 from typing import Any
 
 import polars as pl
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 from arcticdb import QueryBuilder
 
+import polarctic.polarctic as polarctic_module
 from polarctic.polarctic import PolarsToArcticDBTranslator
 
 """
@@ -134,7 +137,7 @@ def test_bitwise_and_integer(translator: PolarsToArcticDBTranslator) -> None:
     assert q == qe
 
 
-def test_or(translator):
+def test_or(translator: PolarsToArcticDBTranslator) -> None:
     q = QueryBuilder()
     q = translator.translate((pl.col("col1") > 2) | (pl.col("col2") < 3), q)
     qe = make_query_builder()
@@ -162,7 +165,7 @@ def test_bitwise_xor_integer(translator: PolarsToArcticDBTranslator) -> None:
     assert q == qe
 
 
-def test_not(translator):
+def test_not(translator: PolarsToArcticDBTranslator) -> None:
     q = QueryBuilder()
     q = translator.translate(~pl.col("col1"), q)
     qe = make_query_builder()
@@ -211,3 +214,129 @@ def test_isin(translator: PolarsToArcticDBTranslator) -> None:
     qe = make_query_builder()
     qe = qe[qe["col1"].isin(24, 42)]
     assert q == qe
+
+
+def test_translate_invalid_expression_raises_value_error(
+    translator: PolarsToArcticDBTranslator,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def raise_syntax_error(_expr: str) -> ast.AST:
+        raise SyntaxError("invalid")
+
+    monkeypatch.setattr(translator, "_parse_expression", raise_syntax_error)
+
+    with pytest.raises(ValueError, match="Invalid Polars expression"):
+        translator.translate(pl.col("col1"), QueryBuilder())
+
+
+def test_replace_square_brackets_handles_missing_open_marker(
+    translator: PolarsToArcticDBTranslator,
+) -> None:
+    assert translator._replace_square_brackets("foo])bar") == "foo])bar"
+
+
+def test_process_node_name_unary_and_unsupported(
+    translator: PolarsToArcticDBTranslator,
+) -> None:
+    assert translator._process_node(ast.parse("field_name", mode="eval").body) == "field_name"
+    assert translator._process_node(ast.parse("-1", mode="eval").body) is not None
+
+    with pytest.raises(NotImplementedError, match="Node type List not supported"):
+        translator._process_node(ast.parse("[1, 2]", mode="eval").body)
+
+
+def test_process_call_contains_requires_string_namespace(
+    translator: PolarsToArcticDBTranslator,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    call_node = ast.parse('col("a").contains("x")', mode="eval").body
+    assert isinstance(call_node, ast.Call)
+    assert isinstance(call_node.func, ast.Attribute)
+    call_value = call_node.func.value
+
+    original_process_node = translator._process_node
+
+    def fake_process_node(node: ast.AST) -> Any:
+        if node is call_node.args[0]:
+            return "x"
+        if node is call_value:
+            return ("lhs", "not_str")
+        return original_process_node(node)
+
+    monkeypatch.setattr(translator, "_process_node", fake_process_node)
+
+    with pytest.raises(NotImplementedError, match="Method contains not supported"):
+        translator._process_call(call_node)
+
+
+def test_process_call_unsupported_methods_and_function_shapes(
+    translator: PolarsToArcticDBTranslator,
+) -> None:
+    unsupported_method_node = ast.parse('col("a").foo()', mode="eval").body
+    assert isinstance(unsupported_method_node, ast.Call)
+    with pytest.raises(NotImplementedError, match="Method foo not supported"):
+        translator._process_call(unsupported_method_node)
+
+    unsupported_name_node = ast.parse('foo("a")', mode="eval").body
+    assert isinstance(unsupported_name_node, ast.Call)
+    assert translator._process_call(unsupported_name_node) is None
+
+    unsupported_func_shape_node = ast.parse("(lambda: 1)()", mode="eval").body
+    assert isinstance(unsupported_func_shape_node, ast.Call)
+    assert translator._process_call(unsupported_func_shape_node) is None
+
+
+def test_process_attribute_compare_and_unary_error_branches(
+    translator: PolarsToArcticDBTranslator,
+) -> None:
+    unsupported_attribute_node = ast.parse('col("a").dt', mode="eval").body
+    assert isinstance(unsupported_attribute_node, ast.Attribute)
+    with pytest.raises(NotImplementedError, match="Attribute dt not supported"):
+        translator._process_attribute(unsupported_attribute_node)
+
+    assert (
+        translator._process_compare(
+            ast.Compare(
+                left=ast.Constant("a"),
+                ops=[ast.In()],
+                comparators=[ast.Constant("b")],
+            )
+        )
+        is not None
+    )
+    assert (
+        translator._process_compare(
+            ast.Compare(
+                left=ast.Constant("a"),
+                ops=[ast.NotIn()],
+                comparators=[ast.Constant("b")],
+            )
+        )
+        is not None
+    )
+
+    with pytest.raises(NotImplementedError, match="Operator <class 'ast.Is'> not supported"):
+        translator._process_compare(
+            ast.Compare(
+                left=ast.Constant(1),
+                ops=[ast.Is()],
+                comparators=[ast.Constant(2)],
+            )
+        )
+
+    unsupported_unary_node = ast.parse("+1", mode="eval").body
+    assert isinstance(unsupported_unary_node, ast.UnaryOp)
+    with pytest.raises(NotImplementedError, match="Operator <class 'ast.UAdd'> not supported"):
+        translator._process_unaryop(unsupported_unary_node)
+
+
+def test_translate_predicate_falls_back_on_unsupported_predicate(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def raise_not_implemented(_predicate: pl.Expr, _query_builder: QueryBuilder) -> Any:
+        raise NotImplementedError("unsupported")
+
+    base_query_builder = QueryBuilder()
+    monkeypatch.setattr(polarctic_module._TRANSLATOR, "translate", raise_not_implemented)
+
+    assert polarctic_module._translate_predicate(pl.col("a"), base_query_builder) is base_query_builder

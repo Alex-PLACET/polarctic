@@ -315,7 +315,7 @@ def test_process_attribute_compare_and_unary_error_branches(
         is not None
     )
 
-    with pytest.raises(NotImplementedError, match="Operator <class 'ast.Is'> not supported"):
+    with pytest.raises(NotImplementedError, match="Operator <class 'ast.Is'> not supported"): # noqa: RUF043
         translator._process_compare(
             ast.Compare(
                 left=ast.Constant(1),
@@ -326,7 +326,7 @@ def test_process_attribute_compare_and_unary_error_branches(
 
     unsupported_unary_node = ast.parse("+1", mode="eval").body
     assert isinstance(unsupported_unary_node, ast.UnaryOp)
-    with pytest.raises(NotImplementedError, match="Operator <class 'ast.UAdd'> not supported"):
+    with pytest.raises(NotImplementedError, match="Operator <class 'ast.UAdd'> not supported"):  # noqa: RUF043
         translator._process_unaryop(unsupported_unary_node)
 
 

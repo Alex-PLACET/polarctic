@@ -1,9 +1,10 @@
+from typing import Any
+
 import pandas as pd
 import pandas.testing as pdt
 import polars as pl
 import pytest
 from arcticdb import OutputFormat, QueryBuilder, VersionedItem
-from typing import Any
 
 import polarctic.polarctic as polarctic_module
 

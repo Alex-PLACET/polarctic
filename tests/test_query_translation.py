@@ -3,7 +3,7 @@ from typing import Any
 
 import polars as pl
 import pytest
-from _pytest.monkeypatch import MonkeyPatch
+from pytest import MonkeyPatch
 from arcticdb import QueryBuilder
 
 import polarctic.polarctic as polarctic_module

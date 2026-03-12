@@ -130,8 +130,8 @@ def _setup(tmp_dir: Path) -> dict[str, Library]:
             }
         )
 
-    lib.write("medium", _df(10_000))
-    lib.write("large", _df(100_000))
+    lib.write("medium", _df(100_000))
+    lib.write("large", _df(100_000_000))
 
     return {"lib": lib}
 
@@ -159,12 +159,12 @@ def _build_cases(lib: Library) -> list[BenchmarkCase]:
 
     return [
         BenchmarkCase(
-            "Full scan - medium (10k rows)",
+            "Full scan - medium (100k rows)",
             lazy_medium.collect,
             lambda: lib.read("medium", output_format=OutputFormat.PANDAS).data,
         ),
         BenchmarkCase(
-            "Full scan - large (100k rows)",
+            "Full scan - large (100M rows)",
             lazy_large.collect,
             lambda: lib.read("large", output_format=OutputFormat.PANDAS).data,
         ),

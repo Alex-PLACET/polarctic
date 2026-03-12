@@ -352,10 +352,17 @@ def _iter_read_request_batches(
 
         yield cast(pl.DataFrame, pl.from_arrow(arrow_table, rechunk=False))
 
-        read_offset += rows_read
+        # Advance by the stored-row range consumed, not by the filtered output count.
+        # When a QueryBuilder filter is active, rows_read < stored_rows_scanned is
+        # expected for every batch (not just the last one), so using rows_read here
+        # would cause the offset to drift and trigger a premature end-of-data break.
+        stored_rows_scanned = batch_end - batch_start
+        read_offset += stored_rows_scanned
         if remaining_rows is not None:
             remaining_rows -= rows_read
-        if rows_read < current_batch_size:
+        # Break when we consumed fewer stored rows than requested — that means we hit
+        # the end of the source (or the base_end cap), not just heavy filter selectivity.
+        if stored_rows_scanned < current_batch_size:
             break
 
 

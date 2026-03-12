@@ -11,6 +11,7 @@ import ast
 import datetime as dt
 import re
 from collections.abc import Callable, Iterator
+from functools import lru_cache
 from typing import Any, cast, overload
 
 import numpy as np
@@ -22,8 +23,6 @@ from arcticdb.version_store.processing import ExpressionNode
 from arcticdb_ext.util import RegexGeneric
 from arcticdb_ext.version_store import OperationType
 
-default_batch_size: int = 1000
-
 
 class PolarsToArcticDBTranslator:
     """
@@ -33,6 +32,11 @@ class PolarsToArcticDBTranslator:
         translator = PolarsToArcticDBTranslator()
         qb = translator.translate(polars_expr, query_builder)
     """
+
+    @staticmethod
+    @lru_cache(maxsize=512)
+    def _parse_expression(expr: str) -> ast.AST:
+        return ast.parse(expr, mode="eval").body
 
     def translate(self, polars_expr: pl.Expr, query_builder: Any) -> Any:
         """
@@ -58,8 +62,7 @@ class PolarsToArcticDBTranslator:
 
         # Parse the expression
         try:
-            tree = ast.parse(expr, mode="eval")
-            expr_node = self._process_node(tree.body)
+            expr_node = self._process_node(self._parse_expression(expr))
         except SyntaxError as e:
             raise ValueError(f"Invalid Polars expression: {polars_expr}") from e
 
@@ -258,10 +261,18 @@ class PolarsToArcticDBTranslator:
 def parse_schema(
     lib: Library, symbol: str, as_of: int | str | dt.datetime | None = None
 ) -> pl.Schema:
-    arrow_df = lib.read(
-        symbol, as_of=as_of, output_format=OutputFormat.PYARROW, row_range=((0, 1))
-    ).data  # type: ignore[union-attr]
-    return pl.Schema(arrow_df.schema)  # type: ignore[arg-type]
+    lazy_source = cast(
+        LazyDataFrame,
+        lib.read(symbol, as_of=as_of, output_format=OutputFormat.PYARROW, lazy=True),
+    )
+    return cast(pl.Schema, lazy_source._collect_schema())  # type: ignore[attr-defined]
+
+
+_TRANSLATOR = PolarsToArcticDBTranslator()
+
+
+def _get_library_from_uri(uri: str, lib_name: str) -> Library:
+    return Arctic(uri).get_library(lib_name)
 
 
 def _translate_predicate(
@@ -271,10 +282,9 @@ def _translate_predicate(
     if predicate is None:
         return query_builder
 
-    translator = PolarsToArcticDBTranslator()
     base_query_builder = query_builder or QueryBuilder()
     try:
-        return cast(QueryBuilder, translator.translate(predicate, base_query_builder))
+        return cast(QueryBuilder, _TRANSLATOR.translate(predicate, base_query_builder))
     except (NotImplementedError, ValueError):
         # Unsupported predicate for ArcticDB pushdown; fall back to Polars-side filtering
         return query_builder
@@ -286,7 +296,36 @@ def _iter_read_request_batches(
     n_rows: int | None,
     batch_size: int | None,
 ) -> Iterator[pl.DataFrame]:
-    effective_batch_size = batch_size or default_batch_size
+    # Fast path: Polars passes batch_size=None for a plain .collect() (no streaming).
+    # Execute a single lib.read() round-trip instead of looping with row_range slices.
+    if batch_size is None:
+        rr = read_request
+        if n_rows is not None:
+            base_start = 0
+            if rr.row_range is not None and rr.row_range[0] is not None:
+                base_start = rr.row_range[0]
+            end = base_start + n_rows
+            if rr.row_range is not None and rr.row_range[1] is not None:
+                end = min(end, rr.row_range[1])
+            rr = rr._replace(row_range=(base_start, end))
+        arrow_table = cast(pa.Table, lib.read(**rr._asdict()).data)
+        if arrow_table.num_rows > 0:
+            yield cast(pl.DataFrame, pl.from_arrow(arrow_table, rechunk=False))
+        return
+
+    # Streaming path: yield fixed-size batches so Polars can process them incrementally.
+    # ArcticDB LazyDataFrame.row_range mutates in place, so each batch must use a
+    # fresh ReadRequest with an absolute row_range.
+    effective_batch_size = batch_size
+    base_start = 0
+    base_end: int | None = None
+    if read_request.row_range is not None:
+        start, end = read_request.row_range
+        if start is not None:
+            base_start = start
+        if end is not None:
+            base_end = end
+
     read_offset = 0
     remaining_rows = n_rows
 
@@ -297,21 +336,21 @@ def _iter_read_request_batches(
             else min(effective_batch_size, remaining_rows)
         )
 
-        lazy_batch = cast(
-            LazyDataFrame,
-            lib.read(**read_request._asdict(), lazy=True),
-        )
-        lazy_batch = cast(
-            LazyDataFrame,
-            lazy_batch.row_range((read_offset, read_offset + current_batch_size)),
-        )
-        arrow_table = cast(pa.Table, lazy_batch.collect().data)
+        batch_start = base_start + read_offset
+        batch_end = batch_start + current_batch_size
+        if base_end is not None:
+            batch_end = min(batch_end, base_end)
+        if batch_end <= batch_start:
+            break
+
+        batch_request = read_request._replace(row_range=(batch_start, batch_end))
+        arrow_table = cast(pa.Table, lib.read(**batch_request._asdict()).data)
         rows_read = arrow_table.num_rows
 
         if rows_read == 0:
             break
 
-        yield cast(pl.DataFrame, pl.from_arrow(arrow_table))
+        yield cast(pl.DataFrame, pl.from_arrow(arrow_table, rechunk=False))
 
         read_offset += rows_read
         if remaining_rows is not None:
@@ -325,27 +364,48 @@ def _register_arctic_source(
     schema_getter: Callable[[], pl.Schema],
     read_request_getter: Callable[[], ReadRequest],
 ) -> pl.LazyFrame:
+    # Cache the schema: Polars may call the getter repeatedly during lazy plan
+    # construction (after each .filter(), .select(), etc.).  The schema of a
+    # versioned symbol is immutable, so one call is always sufficient.
+    _cached_schema: pl.Schema | None = None
+
+    def get_schema() -> pl.Schema:
+        nonlocal _cached_schema
+        if _cached_schema is None:
+            _cached_schema = schema_getter()
+        return _cached_schema
+
+    _cached_read_request: ReadRequest | None = None
+
+    def get_base_read_request() -> ReadRequest:
+        nonlocal _cached_read_request
+        if _cached_read_request is None:
+            base = read_request_getter()
+            if base.output_format != OutputFormat.PYARROW:
+                base = base._replace(output_format=OutputFormat.PYARROW)
+            _cached_read_request = base
+        return _cached_read_request
+
     def source_generator(
         with_columns: list[str] | None,
         predicate: pl.Expr | None,
         n_rows: int | None,
         batch_size: int | None,
     ) -> Iterator[pl.DataFrame]:
-        read_request = read_request_getter()
+        read_request = get_base_read_request()
 
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
 
-        read_request = read_request._replace(
-            output_format=OutputFormat.PYARROW,
-            query_builder=_translate_predicate(predicate, read_request.query_builder),
-        )
+        translated_predicate = _translate_predicate(predicate, read_request.query_builder)
+        if translated_predicate is not read_request.query_builder:
+            read_request = read_request._replace(query_builder=translated_predicate)
 
         yield from _iter_read_request_batches(lib, read_request, n_rows, batch_size)
 
     return pl.io.plugins.register_io_source(  # type: ignore[attr-defined]
         io_source=source_generator,
-        schema=schema_getter,
+        schema=get_schema,
     )
 
 
@@ -417,7 +477,7 @@ def scan_arcticdb(
     if isinstance(source, str):
         if lib_name_or_symbol is None or symbol is None:
             raise ValueError("lib_name and symbol are required when source is a URI string")
-        lib: Library = Arctic(source).get_library(lib_name_or_symbol)
+        lib = _get_library_from_uri(source, lib_name_or_symbol)
     elif isinstance(source, Library):
         lib = source
         if lib_name_or_symbol is None:
@@ -427,9 +487,6 @@ def scan_arcticdb(
         return _scan_lazy_dataframe(source)
     else:
         raise TypeError(f"Unsupported source type: {type(source).__name__}")
-
-    def schema() -> pl.Schema:
-        return parse_schema(lib, symbol, as_of)
 
     base_lazy_source = cast(
         LazyDataFrame,
@@ -443,7 +500,9 @@ def scan_arcticdb(
 
     return _register_arctic_source(
         lib=lib,
-        schema_getter=schema,
+        # _collect_schema() reads the schema from symbol metadata (no data IO),
+        # which is faster than parse_schema()'s row_range=(0,1) data read.
+        schema_getter=lambda: cast(pl.Schema, base_lazy_source._collect_schema()),  # type: ignore[attr-defined]
         read_request_getter=lambda: cast(
             ReadRequest,
             base_lazy_source._to_read_request(),  # type: ignore[attr-defined]

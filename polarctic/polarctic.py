@@ -271,7 +271,6 @@ def parse_schema(
 _TRANSLATOR = PolarsToArcticDBTranslator()
 
 
-@lru_cache(maxsize=32)
 def _get_library_from_uri(uri: str, lib_name: str) -> Library:
     return Arctic(uri).get_library(lib_name)
 
